@@ -80,6 +80,8 @@ unsigned long tempoInicio = 0;     // Tempo de início da etapa atual
 unsigned long tempoCicloInicio = 0; // Tempo de início do ciclo completo
 int totalPassosCiclo = 0;          // Total de passos executados no ciclo
 
+bool firstExec; // flag de primerira execução de cada etapa
+
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
@@ -177,6 +179,7 @@ void setup() {
   // Inicia primeiro ciclo
   estadoAtual = PREPARANDO;
   tempoInicio = millis();
+  firstExec = true;
 }
 
 // ==================== LOOP PRINCIPAL ====================
@@ -219,7 +222,8 @@ void loop() {
 
 void executarPreparacao() {
   static unsigned long ultimaContagem = 0;
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     ultimaContagem = 0; // Reseta a contagem
     cicloNumero++;
     tempoCicloInicio = millis();
@@ -269,7 +273,8 @@ void executarPreparacao() {
 }
 
 void executarDestravamento() {
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     Serial.println("\n[ETAPA 2] 🔓 DESTRAVAMENTO DA CARRETILHA");
     Serial.print("   • Motor de passo: Girando ");
     Serial.print(ANGULO_DESTRAVAMENTO);
@@ -290,7 +295,8 @@ void executarDestravamento() {
 
 void executarQuedaLivre() {
   static int ultimoProgresso = -1;
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     ultimoProgresso = -1;
     Serial.println("\n[ETAPA 3] ⬇️  QUEDA LIVRE EM PROGRESSO");
     Serial.println("   • Penduricalho em queda livre...");
@@ -324,7 +330,8 @@ void executarQuedaLivre() {
 }
 
 void executarTravamento() {
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     Serial.println("\n[ETAPA 4] 🔒 TRAVAMENTO DA CARRETILHA");
     Serial.print("   • Motor de passo: Girando ");
     Serial.print(ANGULO_TRAVAMENTO);
@@ -345,7 +352,8 @@ void executarTravamento() {
 
 void executarEspera() {
   static unsigned long ultimaContagem = 0;
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     ultimaContagem = 0;
     Serial.println("\n[ETAPA 5] ⏳ PERÍODO DE ESPERA");
     Serial.println("   • Carretilha firmemente travada 🔒");
@@ -376,7 +384,8 @@ void executarEspera() {
 
 void executarPuxadaCarretilha() {
   static unsigned long ultimoProgresso = 0;
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     ultimoProgresso = 0;
     Serial.println("\n[ETAPA 6] 🔄 RECOLHIMENTO VIA MOTOR DC");
     Serial.print("   • Tempo de operação programado: ");
@@ -417,7 +426,8 @@ void executarPuxadaCarretilha() {
 
 void executarFinalizacaoCiclo() {
   static unsigned long ultimaContagem = 0;
-  if(millis() - tempoInicio == 0) { // Primeira execução desta etapa
+  if(firstExec) { // Primeira execução desta etapa
+    firstExec = false;
     ultimaContagem = 0;
     Serial.println("\n[ETAPA 7] ⏸️  FINALIZAÇÃO DO CICLO");
     Serial.println("   • Penduricalho: Retornou à posição inicial 📍");
@@ -451,6 +461,7 @@ void executarFinalizacaoCiclo() {
 void proximoEstado(EstadoSistema novoEstado) {
   estadoAtual = novoEstado;
   tempoInicio = millis();
+  firstExec = true;
 }
 
 int moverMotorPasso(int graus, bool horario) {

@@ -28,7 +28,7 @@ const int LED_BUILTIN = 2;     // LED embutido do ESP32
 // ==================== CONFIGURAÇÕES DO SISTEMA ====================
 // Tempo de cada etapa em milissegundos
 const unsigned long TEMPO_DE_SUBIDA = 30000;      // 30 segundos para içar
-const unsigned long TEMPO_DE_RETENCAO = 4000;    // 4 segundo mantendo suspenso
+const unsigned long TEMPO_DE_RETENCAO = 8000;    // 8 segundo mantendo suspenso
 const unsigned long TEMPO_DE_QUEDA = 8000;       // 8 segundos com objeto baixo
 
 // ==================== CONFIGURAÇÃO DO MOTOR DE PASSO ====================

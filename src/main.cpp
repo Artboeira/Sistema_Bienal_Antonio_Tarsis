@@ -46,6 +46,12 @@ const int PASSOS_OVERDRIVE = 25;
 
 // ==================== DEFINIÇÃO DA MÁQUINA DE ESTADOS ====================
 enum EstadoSistema {
+  // New Initialization States
+  INICIALIZANDO_LIBERACAO_INDO,
+  INICIALIZANDO_LIBERACAO_ESPERANDO,
+  INICIALIZANDO_LIBERACAO_VOLTANDO,
+
+  // Existing Main Loop States
   ICANDO,              // Içando o objeto
   RETENDO_ALTO,        // Mantendo o objeto suspenso
   LIBERANDO_INDO,      // Stepper moving to release position
@@ -113,7 +119,7 @@ void setup() {
   Serial.print(ANGULO_HOMING);
   Serial.println("° no sentido anti-horário para calibrar...");
   
-  // Move o motor -ANGULO_HOMING graus (horário) para posição de referência
+  // Move o motor ANGULO_HOMING graus (horário) para posição de referência
   int passosHoming = (ANGULO_HOMING * STEPS_PER_REV) / 360;
   stepper.moveTo(passosHoming);
   
@@ -126,18 +132,18 @@ void setup() {
   stepper.setCurrentPosition(0);
   Serial.println("✅ Posição calibrada - Zero absoluto estabelecido");
   
-  // Inicia o estado do sistema
-  estadoAtual = ICANDO;
+  // Inicia a sequência de liberação de segurança
+  Serial.println("\n🛡️ INICIANDO SEQUÊNCIA DE LIBERAÇÃO DE SEGURANÇA");
+  estadoAtual = INICIALIZANDO_LIBERACAO_INDO;
   tempoInicioEstado = millis();
+
+  // Entry Action for the new initial state
+  Serial.print("[INICIALIZANDO] Movendo para a posição de liberação (-");
+  Serial.print(ANGULO_LIBERACAO);
+  Serial.println("°)...");
+  int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
+  stepper.moveTo(passos);
   
-  // Entry Action for initial state (ICANDO)
-  Serial.println("[ICANDO] 🚀 Acionando motor de içamento...");
-  digitalWrite(RELAY_CH1_PIN, LOW);   // LOW = relé ativado (ativo baixo)
-  digitalWrite(LED_BUILTIN, HIGH);    // HIGH = LED ativado
-  
-  Serial.println("\n🚀 SISTEMA PRONTO PARA INICIAR SEQUÊNCIA!");
-  Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  Serial.println("");
 }
 
 // ==================== LOOP PRINCIPAL ====================
@@ -147,6 +153,62 @@ void loop() {
   
   // Máquina de estados principal
   switch (estadoAtual) {
+    case INICIALIZANDO_LIBERACAO_INDO:
+      // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
+      if (stepper.distanceToGo() == 0) {
+        // --- START OF TRANSITION BLOCK ---
+        // Entry Action for INICIALIZANDO_LIBERACAO_ESPERANDO (nada além de logging)
+        Serial.print("[INICIALIZANDO] Posição de liberação alcançada. Aguardando ");
+        Serial.print(1000); // Manter hardcoded conforme solicitado
+        Serial.println("ms...");
+
+        // State Transition
+        estadoAtual = INICIALIZANDO_LIBERACAO_ESPERANDO;
+        tempoInicioEstado = millis();
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+      
+    case INICIALIZANDO_LIBERACAO_ESPERANDO:
+      // Condição: Espera 1000ms
+      if (millis() - tempoInicioEstado >= 1000) {
+        // --- START OF TRANSITION BLOCK ---
+        // Entry Action for INICIALIZANDO_LIBERACAO_VOLTANDO
+        Serial.print("[INICIALIZANDO] Retornando à posição zero com overdrive (alvo: +");
+        Serial.print(PASSOS_OVERDRIVE);
+        Serial.println(" passos)...");
+        stepper.moveTo(PASSOS_OVERDRIVE);
+
+        // State Transition
+        estadoAtual = INICIALIZANDO_LIBERACAO_VOLTANDO;
+        tempoInicioEstado = millis();
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+      
+    case INICIALIZANDO_LIBERACAO_VOLTANDO:
+      // Condição: Espera o stepper voltar para posição PASSOS_OVERDRIVE
+      if (stepper.distanceToGo() == 0) {
+        // --- START OF TRANSITION BLOCK ---
+        Serial.println("[INICIALIZANDO] ✅ Liberação de segurança concluída.");
+        
+        // CRITICAL: Recalibrate the logical position to the physical reality (0).
+        stepper.setCurrentPosition(0);
+
+        // State Transition TO THE MAIN LOOP'S FIRST STATE
+        estadoAtual = ICANDO;
+        tempoInicioEstado = millis();
+        
+        // Entry Action for the main loop's first state (ICANDO)
+        Serial.println("\n🚀 SISTEMA PRONTO. INICIANDO CICLO OPERACIONAL!");
+        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        Serial.println("[ICANDO] 🚀 Acionando motor de içamento...");
+        digitalWrite(RELAY_CH1_PIN, LOW);
+        digitalWrite(LED_BUILTIN, HIGH);
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+      
     case ICANDO:
       // Condição: Tempo de subida concluído
       if (millis() - tempoInicioEstado >= TEMPO_DE_SUBIDA) {
@@ -170,9 +232,9 @@ void loop() {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for LIBERANDO_INDO
         Serial.println("[LIBERANDO] 🔓 Iniciando sequência de liberação...");
-        Serial.print("[LIBERANDO] ↺ Movendo motor de passo para -");
+        Serial.print("[LIBERANDO] Movendo para a posição de liberação (-");
         Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°...");
+        Serial.println("°)...");
         int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
         stepper.moveTo(passos);
 
@@ -188,9 +250,9 @@ void loop() {
       if (stepper.distanceToGo() == 0) {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for LIBERANDO_ESPERANDO (nada além de logging)
-        Serial.print("[LIBERANDO] ⏱️  Esperando 1000ms na posição -");
-        Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°...");
+        Serial.print("[LIBERANDO] Posição de liberação alcançada. Aguardando ");
+        Serial.print(1000); // Manter hardcoded conforme solicitado
+        Serial.println("ms...");
 
         // State Transition
         estadoAtual = LIBERANDO_ESPERANDO;
@@ -204,9 +266,9 @@ void loop() {
       if (millis() - tempoInicioEstado >= 1000) {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for LIBERANDO_VOLTANDO
-        Serial.print("[LIBERANDO] ↻ Movendo motor de passo de volta para ");
+        Serial.print("[LIBERANDO] Retornando à posição zero com overdrive (alvo: +");
         Serial.print(PASSOS_OVERDRIVE);
-        Serial.println(" passos...");
+        Serial.println(" passos)...");
         stepper.moveTo(PASSOS_OVERDRIVE);
 
         // State Transition

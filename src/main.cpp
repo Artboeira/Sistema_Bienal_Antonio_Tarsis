@@ -4,7 +4,7 @@
  * Sequência:
  * 1. ICANDO - Aciona o motor de içamento por 6 segundos
  * 2. RETENDO_ALTO - Mantém o objeto suspenso por 1 segundo
- * 3. LIBERANDO - Libera o objeto com movimento do motor de passo (-60°, espera 200ms, retorna a 0°)
+ * 3. LIBERANDO - Libera o objeto com movimento do motor de passo
  * 4. RETENDO_BAIXO - Mantém o objeto baixo por 4 segundos
  * 5. Repete o ciclo
  */
@@ -32,23 +32,25 @@ const unsigned long TEMPO_DE_RETENCAO = 4000;    // 4 segundo mantendo suspenso
 const unsigned long TEMPO_DE_QUEDA = 8000;       // 8 segundos com objeto baixo
 
 // ==================== CONFIGURAÇÃO DO MOTOR DE PASSO ====================
-// Para 1/8 STEP (mais suave):
-const int STEPS_PER_REV = 1600;  // 1600 passos por volta (1/8 Step)
+// Configuração dos passos por revolução (sem microstepping):
+const int STEPS_PER_REV = 200;  // 200 para 1/1 (full step), 400 para 1/2, 800 para 1/4, etc.
 
 // Ângulo de movimento do motor de passo durante a liberação
-const int ANGULO_LIBERACAO = 200;  // Graus para girar / nao corresponde com a realidade de 180º
+const int ANGULO_LIBERACAO = 90;  // Graus para girar 
 
 // Ângulo de movimento do motor de passo durante o HOMING
-const int ANGULO_HOMING = 260;  // Graus para girar
+const int ANGULO_HOMING = 120;  // Graus para girar
 
+// Passos extras para garantir o reset contra o batente físico
+const int PASSOS_OVERDRIVE = 25;
 
 // ==================== DEFINIÇÃO DA MÁQUINA DE ESTADOS ====================
 enum EstadoSistema {
   ICANDO,              // Içando o objeto
   RETENDO_ALTO,        // Mantendo o objeto suspenso
-  LIBERANDO_INDO,      // Stepper moving to -60 degrees
-  LIBERANDO_ESPERANDO, // Waiting for 200ms
-  LIBERANDO_VOLTANDO,  // Stepper returning to 0 degrees
+  LIBERANDO_INDO,      // Stepper moving to release position
+  LIBERANDO_ESPERANDO, // Waiting for 1000ms
+  LIBERANDO_VOLTANDO,  // Stepper returning to overdrive position
   RETENDO_BAIXO        // Mantendo o objeto baixo
 };
 
@@ -96,8 +98,8 @@ void setup() {
   
   // Configuração do motor de passo com AccelStepper
   Serial.println("\n⚙️  Configurando motor de passo...");
-  stepper.setMaxSpeed(4000.0);      // Velocidade máxima em passos/segundo
-  stepper.setAcceleration(2000.0);    // Aceleração em passos/segundo/segundo
+  stepper.setMaxSpeed(30.0);      // Velocidade máxima em passos/segundo
+  stepper.setAcceleration(15.0);    // Aceleração em passos/segundo/segundo
   stepper.setCurrentPosition(0);     // Define posição inicial como zero
   
   // Corrige a direção do motor de passo
@@ -107,10 +109,12 @@ void setup() {
   
   // Sequência de homing (calibração de posição)
   Serial.println("\n🏁 INICIANDO SEQUÊNCIA DE HOMING");
-  Serial.println("   Movendo motor 180° no sentido horário para calibrar...");
+  Serial.print("   Movendo motor ");
+  Serial.print(ANGULO_HOMING);
+  Serial.println("° no sentido anti-horário para calibrar...");
   
-  // Move o motor -180 graus (horário) para posição de referência
-  int passosHoming = (ANGULO_HOMING * 1600) / 360;
+  // Move o motor -ANGULO_HOMING graus (horário) para posição de referência
+  int passosHoming = (ANGULO_HOMING * STEPS_PER_REV) / 360;
   stepper.moveTo(passosHoming);
   
   // Espera bloqueante para conclusão do homing (aceitável pois é apenas no setup)
@@ -166,7 +170,9 @@ void loop() {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for LIBERANDO_INDO
         Serial.println("[LIBERANDO] 🔓 Iniciando sequência de liberação...");
-        Serial.println("[LIBERANDO] ↺ Movendo motor de passo para -60°...");
+        Serial.print("[LIBERANDO] ↺ Movendo motor de passo para -");
+        Serial.print(ANGULO_LIBERACAO);
+        Serial.println("°...");
         int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
         stepper.moveTo(passos);
 
@@ -178,11 +184,13 @@ void loop() {
       break;
       
     case LIBERANDO_INDO:
-      // Condição: Espera o stepper chegar na posição de -60°
+      // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
       if (stepper.distanceToGo() == 0) {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for LIBERANDO_ESPERANDO (nada além de logging)
-        Serial.println("[LIBERANDO] ⏱️  Esperando 200ms na posição -60°...");
+        Serial.print("[LIBERANDO] ⏱️  Esperando 1000ms na posição -");
+        Serial.print(ANGULO_LIBERACAO);
+        Serial.println("°...");
 
         // State Transition
         estadoAtual = LIBERANDO_ESPERANDO;
@@ -192,12 +200,14 @@ void loop() {
       break;
       
     case LIBERANDO_ESPERANDO:
-      // Condição: Espera 200ms
+      // Condição: Espera 1000ms
       if (millis() - tempoInicioEstado >= 1000) {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for LIBERANDO_VOLTANDO
-        Serial.println("[LIBERANDO] ↻ Movendo motor de passo de volta para 0°...");
-        stepper.moveTo(0);
+        Serial.print("[LIBERANDO] ↻ Movendo motor de passo de volta para ");
+        Serial.print(PASSOS_OVERDRIVE);
+        Serial.println(" passos...");
+        stepper.moveTo(PASSOS_OVERDRIVE);
 
         // State Transition
         estadoAtual = LIBERANDO_VOLTANDO;
@@ -207,11 +217,14 @@ void loop() {
       break;
       
     case LIBERANDO_VOLTANDO:
-      // Condição: Espera o stepper voltar para posição 0
+      // Condição: Espera o stepper voltar para posição PASSOS_OVERDRIVE
       if (stepper.distanceToGo() == 0) {
         // --- START OF TRANSITION BLOCK ---
         // Entry Action for RETENDO_BAIXO (nada além de logging)
-        Serial.println("[LIBERANDO] ✅ Sequência de liberação concluída");
+        Serial.println("[LIBERANDO] ✅ Sequência de liberação concluída, batente alcançado.");
+        
+        // CRITICAL: Recalibrate the logical position to the physical reality (0).
+        stepper.setCurrentPosition(0);
 
         // State Transition
         estadoAtual = RETENDO_BAIXO;

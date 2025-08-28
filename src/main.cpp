@@ -27,9 +27,9 @@ const int LED_BUILTIN = 2;     // LED embutido do ESP32
 
 // ==================== CONFIGURAÇÕES DO SISTEMA ====================
 // Tempo de cada etapa em milissegundos
-const unsigned long TEMPO_DE_SUBIDA = 30000;      // 30 segundos para içar
-const unsigned long TEMPO_DE_RETENCAO = 8000;    // 8 segundo mantendo suspenso
-const unsigned long TEMPO_DE_QUEDA = 8000;       // 8 segundos com objeto baixo
+const unsigned long TEMPO_DE_SUBIDA = 35000;      // 30 segundos para içar
+const unsigned long TEMPO_DE_RETENCAO = 60000;    // 8 segundo mantendo suspenso
+const unsigned long TEMPO_DE_QUEDA = 18000;       // 8 segundos com objeto baixo
 
 // ==================== CONFIGURAÇÃO DO MOTOR DE PASSO ====================
 // Configuração dos passos por revolução (sem microstepping):
@@ -42,7 +42,7 @@ const int ANGULO_LIBERACAO = 90;  // Graus para girar
 const int ANGULO_HOMING = 120;  // Graus para girar
 
 // Passos extras para garantir o reset contra o batente físico
-const int PASSOS_OVERDRIVE = 25;
+const int PASSOS_OVERDRIVE = 20;
 
 // ==================== DEFINIÇÃO DA MÁQUINA DE ESTADOS ====================
 enum EstadoSistema {

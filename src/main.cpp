@@ -1,14 +1,3 @@
-/*
- * Controle de Motor de Passo - Sequência Pré-definida para Instalação Artística
- * 
- * Sequência:
- * 1. ICANDO - Aciona o motor de içamento por 6 segundos
- * 2. RETENDO_ALTO - Mantém o objeto suspenso por 1 segundo
- * 3. LIBERANDO - Libera o objeto com movimento do motor de passo
- * 4. RETENDO_BAIXO - Mantém o objeto baixo por 4 segundos
- * 5. Repete o ciclo
- */
-
 #include <Arduino.h>
 #include <AccelStepper.h>
 
@@ -30,6 +19,7 @@ const int LED_BUILTIN = 2;     // LED embutido do ESP32
 const unsigned long TEMPO_DE_SUBIDA = 35000;      // 30 segundos para içar
 const unsigned long TEMPO_DE_RETENCAO = 60000;    // 8 segundo mantendo suspenso
 const unsigned long TEMPO_DE_QUEDA = 18000;       // 8 segundos com objeto baixo
+const unsigned long TEMPO_PULSO_DC = 500; // 500ms de pulso para garantir a liberação
 
 // ==================== CONFIGURAÇÃO DO MOTOR DE PASSO ====================
 // Configuração dos passos por revolução (sem microstepping):
@@ -54,9 +44,20 @@ enum EstadoSistema {
   // Existing Main Loop States
   ICANDO,              // Içando o objeto
   RETENDO_ALTO,        // Mantendo o objeto suspenso
-  LIBERANDO_INDO,      // Stepper moving to release position
-  LIBERANDO_ESPERANDO, // Waiting for 1000ms
-  LIBERANDO_VOLTANDO,  // Stepper returning to overdrive position
+
+  // Ciclo de Liberação #1
+  LIBERANDO_CICLO1_INDO,
+  LIBERANDO_CICLO1_ESPERANDO,
+  LIBERANDO_CICLO1_VOLTANDO,
+
+  // Pulso Intermediário do Motor DC
+  LIBERANDO_PULSO_DC,
+
+  // Ciclo de Liberação #2
+  LIBERANDO_CICLO2_INDO,
+  LIBERANDO_CICLO2_ESPERANDO,
+  LIBERANDO_CICLO2_VOLTANDO,
+
   RETENDO_BAIXO        // Mantendo o objeto baixo
 };
 
@@ -239,59 +240,136 @@ void loop() {
         stepper.moveTo(passos);
 
         // State Transition
-        estadoAtual = LIBERANDO_INDO;
+        estadoAtual = LIBERANDO_CICLO1_INDO;
         tempoInicioEstado = millis();
         // --- END OF TRANSITION BLOCK ---
       }
       break;
       
-    case LIBERANDO_INDO:
+    case LIBERANDO_CICLO1_INDO:
       // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
       if (stepper.distanceToGo() == 0) {
         // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_ESPERANDO (nada além de logging)
-        Serial.print("[LIBERANDO] Posição de liberação alcançada. Aguardando ");
+        // Entry Action for LIBERANDO_CICLO1_ESPERANDO (nada além de logging)
+        Serial.print("[LIBERANDO-C1] Posição de liberação alcançada. Aguardando ");
         Serial.print(1000); // Manter hardcoded conforme solicitado
         Serial.println("ms...");
 
         // State Transition
-        estadoAtual = LIBERANDO_ESPERANDO;
+        estadoAtual = LIBERANDO_CICLO1_ESPERANDO;
         tempoInicioEstado = millis();
         // --- END OF TRANSITION BLOCK ---
       }
       break;
       
-    case LIBERANDO_ESPERANDO:
+    case LIBERANDO_CICLO1_ESPERANDO:
       // Condição: Espera 1000ms
       if (millis() - tempoInicioEstado >= 1000) {
         // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_VOLTANDO
-        Serial.print("[LIBERANDO] Retornando à posição zero com overdrive (alvo: +");
+        // Entry Action for LIBERANDO_CICLO1_VOLTANDO
+        Serial.print("[LIBERANDO-C1] Retornando à posição zero com overdrive (alvo: +");
         Serial.print(PASSOS_OVERDRIVE);
         Serial.println(" passos)...");
         stepper.moveTo(PASSOS_OVERDRIVE);
 
         // State Transition
-        estadoAtual = LIBERANDO_VOLTANDO;
+        estadoAtual = LIBERANDO_CICLO1_VOLTANDO;
         tempoInicioEstado = millis();
         // --- END OF TRANSITION BLOCK ---
       }
       break;
       
-    case LIBERANDO_VOLTANDO:
-      // Condição: Espera o stepper voltar para posição PASSOS_OVERDRIVE
+    case LIBERANDO_CICLO1_VOLTANDO:
+      // Condição: Espera o stepper voltar para a posição de overdrive
       if (stepper.distanceToGo() == 0) {
         // --- START OF TRANSITION BLOCK ---
-        // Entry Action for RETENDO_BAIXO (nada além de logging)
-        Serial.println("[LIBERANDO] ✅ Sequência de liberação concluída, batente alcançado.");
-        
-        // CRITICAL: Recalibrate the logical position to the physical reality (0).
-        stepper.setCurrentPosition(0);
+        Serial.println("[LIBERANDO-C1] ✅ Primeiro ciclo de liberação concluído.");
+        stepper.setCurrentPosition(0); // Recalibra após o primeiro ciclo
+
+        // Entry Action for the NEXT state (LIBERANDO_PULSO_DC)
+        Serial.print("[LIBERANDO-PULSO] ⚡ Acionando pulso de ");
+        Serial.print(TEMPO_PULSO_DC);
+        Serial.println("ms no motor DC...");
+        digitalWrite(RELAY_CH1_PIN, LOW); // Ativa o relé (motor DC)
+        digitalWrite(LED_BUILTIN, HIGH);  // Liga o LED junto
+
+        // State Transition
+        estadoAtual = LIBERANDO_PULSO_DC;
+        tempoInicioEstado = millis();
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+
+    case LIBERANDO_PULSO_DC:
+      // Condição: Espera o tempo do pulso terminar
+      if (millis() - tempoInicioEstado >= TEMPO_PULSO_DC) {
+        // --- START OF TRANSITION BLOCK ---
+        // Desativa o motor DC
+        digitalWrite(RELAY_CH1_PIN, HIGH);
+        digitalWrite(LED_BUILTIN, LOW);
+        Serial.println("[LIBERANDO-PULSO] ✅ Pulso DC concluído.");
+
+        // Entry Action for the NEXT state (LIBERANDO_CICLO2_INDO)
+        // (A lógica é idêntica ao início do primeiro ciclo)
+        Serial.print("[LIBERANDO-C2] 🔓 Iniciando SEGUNDO ciclo de liberação (-");
+        Serial.print(ANGULO_LIBERACAO);
+        Serial.println("°)...");
+        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
+        stepper.moveTo(passos);
+
+        // State Transition
+        estadoAtual = LIBERANDO_CICLO2_INDO;
+        tempoInicioEstado = millis();
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+
+    case LIBERANDO_CICLO2_INDO:
+      // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
+      if (stepper.distanceToGo() == 0) {
+        // --- START OF TRANSITION BLOCK ---
+        // Entry Action for LIBERANDO_CICLO2_ESPERANDO (nada além de logging)
+        Serial.print("[LIBERANDO-C2] Posição de liberação alcançada. Aguardando ");
+        Serial.print(1000); // Manter hardcoded conforme solicitado
+        Serial.println("ms...");
+
+        // State Transition
+        estadoAtual = LIBERANDO_CICLO2_ESPERANDO;
+        tempoInicioEstado = millis();
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+
+    case LIBERANDO_CICLO2_ESPERANDO:
+      // Condição: Espera 1000ms
+      if (millis() - tempoInicioEstado >= 1000) {
+        // --- START OF TRANSITION BLOCK ---
+        // Entry Action for LIBERANDO_CICLO2_VOLTANDO
+        Serial.print("[LIBERANDO-C2] Retornando à posição zero com overdrive (alvo: +");
+        Serial.print(PASSOS_OVERDRIVE);
+        Serial.println(" passos)...");
+        stepper.moveTo(PASSOS_OVERDRIVE);
+
+        // State Transition
+        estadoAtual = LIBERANDO_CICLO2_VOLTANDO;
+        tempoInicioEstado = millis();
+        // --- END OF TRANSITION BLOCK ---
+      }
+      break;
+
+    case LIBERANDO_CICLO2_VOLTANDO:
+      // Condição: Espera o stepper voltar para a posição de overdrive
+      if (stepper.distanceToGo() == 0) {
+        // --- START OF TRANSITION BLOCK ---
+        Serial.println("[LIBERANDO-C2] ✅ Segundo ciclo de liberação concluído.");
+        stepper.setCurrentPosition(0); // Recalibra após o segundo ciclo
+
+        // Entry Action for the NEXT state (RETENDO_BAIXO)
+        Serial.println("[RETENDO_BAIXO] ⏸️  Mantendo objeto baixo...");
 
         // State Transition
         estadoAtual = RETENDO_BAIXO;
         tempoInicioEstado = millis();
-        Serial.println("[RETENDO_BAIXO] ⏸️  Mantendo objeto baixo...");
         // --- END OF TRANSITION BLOCK ---
       }
       break;

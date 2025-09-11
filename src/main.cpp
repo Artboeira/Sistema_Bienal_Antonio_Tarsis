@@ -12,13 +12,13 @@ const int RELAY_CH1_PIN = 21;  // Controle do motor de içamento
 const int RELAY_CH2_PIN = 22;  // Reserva para expansão
 
 // Built-in LED pin
-const int LED_BUILTIN = 2;     // LED embutido do ESP32
+// const int LED_BUILTIN = 2;     // LED embutido do ESP32
 
 // ==================== CONFIGURAÇÕES DO SISTEMA ====================
 // Tempo de cada etapa em milissegundos
-const unsigned long TEMPO_DE_SUBIDA = 35000;      // 30 segundos para içar
-const unsigned long TEMPO_DE_RETENCAO = 60000;    // 8 segundo mantendo suspenso
-const unsigned long TEMPO_DE_QUEDA = 18000;       // 8 segundos com objeto baixo
+const unsigned long TEMPO_DE_SUBIDA = 18000;      // 18 segundos para içar
+const unsigned long TEMPO_DE_RETENCAO = 150000;    // 150 segundos mantendo suspenso
+const unsigned long TEMPO_DE_QUEDA = 40000;       // 40 segundos com objeto baixo
 const unsigned long TEMPO_PULSO_DC = 500; // 500ms de pulso para garantir a liberação
 
 // ==================== CONFIGURAÇÃO DO MOTOR DE PASSO ====================
@@ -36,24 +36,29 @@ const int PASSOS_OVERDRIVE = 20;
 
 // ==================== DEFINIÇÃO DA MÁQUINA DE ESTADOS ====================
 enum EstadoSistema {
-  // New Initialization States
+  // Initialization States (executados apenas no setup)
   INICIALIZANDO_LIBERACAO_INDO,
   INICIALIZANDO_LIBERACAO_ESPERANDO,
   INICIALIZANDO_LIBERACAO_VOLTANDO,
 
-  // Existing Main Loop States
+  // NOVOS ESTADOS: Liberação Preventiva no Início do Loop Principal
+  PREVENTIVO_CICLO1_INDO,
+  PREVENTIVO_CICLO1_ESPERANDO,
+  PREVENTIVO_CICLO1_VOLTANDO,
+  PREVENTIVO_PULSO_DC,
+  PREVENTIVO_CICLO2_INDO,
+  PREVENTIVO_CICLO2_ESPERANDO,
+  PREVENTIVO_CICLO2_VOLTANDO,
+
+  // Estados Principais do Loop Operacional
   ICANDO,              // Içando o objeto
   RETENDO_ALTO,        // Mantendo o objeto suspenso
 
-  // Ciclo de Liberação #1
+  // Ciclo de Liberação Final (mantido para o final da sequência)
   LIBERANDO_CICLO1_INDO,
   LIBERANDO_CICLO1_ESPERANDO,
   LIBERANDO_CICLO1_VOLTANDO,
-
-  // Pulso Intermediário do Motor DC
   LIBERANDO_PULSO_DC,
-
-  // Ciclo de Liberação #2
   LIBERANDO_CICLO2_INDO,
   LIBERANDO_CICLO2_ESPERANDO,
   LIBERANDO_CICLO2_VOLTANDO,
@@ -66,7 +71,7 @@ enum EstadoSistema {
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 
 // Estado atual do sistema
-EstadoSistema estadoAtual = ICANDO;
+EstadoSistema estadoAtual = INICIALIZANDO_LIBERACAO_INDO;
 
 // Timestamp para controle de tempo não bloqueante
 unsigned long tempoInicioEstado = 0;
@@ -144,7 +149,6 @@ void setup() {
   Serial.println("°)...");
   int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
   stepper.moveTo(passos);
-  
 }
 
 // ==================== LOOP PRINCIPAL ====================
@@ -154,242 +158,268 @@ void loop() {
   
   // Máquina de estados principal
   switch (estadoAtual) {
+    // ==================== ESTADOS DE INICIALIZAÇÃO (SETUP) ====================
     case INICIALIZANDO_LIBERACAO_INDO:
-      // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
       if (stepper.distanceToGo() == 0) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for INICIALIZANDO_LIBERACAO_ESPERANDO (nada além de logging)
         Serial.print("[INICIALIZANDO] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000); // Manter hardcoded conforme solicitado
+        Serial.print(1000);
         Serial.println("ms...");
-
-        // State Transition
         estadoAtual = INICIALIZANDO_LIBERACAO_ESPERANDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
       
     case INICIALIZANDO_LIBERACAO_ESPERANDO:
-      // Condição: Espera 1000ms
       if (millis() - tempoInicioEstado >= 1000) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for INICIALIZANDO_LIBERACAO_VOLTANDO
         Serial.print("[INICIALIZANDO] Retornando à posição zero com overdrive (alvo: +");
         Serial.print(PASSOS_OVERDRIVE);
         Serial.println(" passos)...");
         stepper.moveTo(PASSOS_OVERDRIVE);
-
-        // State Transition
         estadoAtual = INICIALIZANDO_LIBERACAO_VOLTANDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
       
     case INICIALIZANDO_LIBERACAO_VOLTANDO:
-      // Condição: Espera o stepper voltar para posição PASSOS_OVERDRIVE
       if (stepper.distanceToGo() == 0) {
-        // --- START OF TRANSITION BLOCK ---
         Serial.println("[INICIALIZANDO] ✅ Liberação de segurança concluída.");
-        
-        // CRITICAL: Recalibrate the logical position to the physical reality (0).
         stepper.setCurrentPosition(0);
-
-        // State Transition TO THE MAIN LOOP'S FIRST STATE
-        estadoAtual = ICANDO;
+        
+        // MUDANÇA CRÍTICA: Agora vai para a liberação preventiva, não direto para ICANDO
+        estadoAtual = PREVENTIVO_CICLO1_INDO;
         tempoInicioEstado = millis();
         
-        // Entry Action for the main loop's first state (ICANDO)
-        Serial.println("\n🚀 SISTEMA PRONTO. INICIANDO CICLO OPERACIONAL!");
+        Serial.println("\n🚀 SISTEMA PRONTO. INICIANDO LIBERAÇÃO PREVENTIVA!");
         Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        Serial.println("[ICANDO] 🚀 Acionando motor de içamento...");
-        digitalWrite(RELAY_CH1_PIN, LOW);
-        digitalWrite(LED_BUILTIN, HIGH);
-        // --- END OF TRANSITION BLOCK ---
+        Serial.print("[PREVENTIVO-C1] 🔓 Iniciando liberação preventiva (-");
+        Serial.print(ANGULO_LIBERACAO);
+        Serial.println("°)...");
+        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
+        stepper.moveTo(passos);
+      }
+      break;
+
+    // ==================== NOVOS ESTADOS: LIBERAÇÃO PREVENTIVA ====================
+    case PREVENTIVO_CICLO1_INDO:
+      if (stepper.distanceToGo() == 0) {
+        Serial.print("[PREVENTIVO-C1] Posição de liberação alcançada. Aguardando ");
+        Serial.print(1000);
+        Serial.println("ms...");
+        estadoAtual = PREVENTIVO_CICLO1_ESPERANDO;
+        tempoInicioEstado = millis();
       }
       break;
       
+    case PREVENTIVO_CICLO1_ESPERANDO:
+      if (millis() - tempoInicioEstado >= 1000) {
+        Serial.print("[PREVENTIVO-C1] Retornando à posição zero com overdrive (alvo: +");
+        Serial.print(PASSOS_OVERDRIVE);
+        Serial.println(" passos)...");
+        stepper.moveTo(PASSOS_OVERDRIVE);
+        estadoAtual = PREVENTIVO_CICLO1_VOLTANDO;
+        tempoInicioEstado = millis();
+      }
+      break;
+      
+    case PREVENTIVO_CICLO1_VOLTANDO:
+      if (stepper.distanceToGo() == 0) {
+        Serial.println("[PREVENTIVO-C1] ✅ Primeiro ciclo preventivo concluído.");
+        stepper.setCurrentPosition(0);
+        
+        Serial.print("[PREVENTIVO-PULSO] ⚡ Acionando pulso preventivo de ");
+        Serial.print(TEMPO_PULSO_DC);
+        Serial.println("ms no motor DC...");
+        digitalWrite(RELAY_CH1_PIN, LOW);
+        digitalWrite(LED_BUILTIN, HIGH);
+        
+        estadoAtual = PREVENTIVO_PULSO_DC;
+        tempoInicioEstado = millis();
+      }
+      break;
+
+    case PREVENTIVO_PULSO_DC:
+      if (millis() - tempoInicioEstado >= TEMPO_PULSO_DC) {
+        digitalWrite(RELAY_CH1_PIN, HIGH);
+        digitalWrite(LED_BUILTIN, LOW);
+        Serial.println("[PREVENTIVO-PULSO] ✅ Pulso preventivo concluído.");
+        
+        Serial.print("[PREVENTIVO-C2] 🔓 Iniciando SEGUNDO ciclo preventivo (-");
+        Serial.print(ANGULO_LIBERACAO);
+        Serial.println("°)...");
+        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
+        stepper.moveTo(passos);
+        
+        estadoAtual = PREVENTIVO_CICLO2_INDO;
+        tempoInicioEstado = millis();
+      }
+      break;
+
+    case PREVENTIVO_CICLO2_INDO:
+      if (stepper.distanceToGo() == 0) {
+        Serial.print("[PREVENTIVO-C2] Posição de liberação alcançada. Aguardando ");
+        Serial.print(1000);
+        Serial.println("ms...");
+        estadoAtual = PREVENTIVO_CICLO2_ESPERANDO;
+        tempoInicioEstado = millis();
+      }
+      break;
+
+    case PREVENTIVO_CICLO2_ESPERANDO:
+      if (millis() - tempoInicioEstado >= 1000) {
+        Serial.print("[PREVENTIVO-C2] Retornando à posição zero com overdrive (alvo: +");
+        Serial.print(PASSOS_OVERDRIVE);
+        Serial.println(" passos)...");
+        stepper.moveTo(PASSOS_OVERDRIVE);
+        estadoAtual = PREVENTIVO_CICLO2_VOLTANDO;
+        tempoInicioEstado = millis();
+      }
+      break;
+
+    case PREVENTIVO_CICLO2_VOLTANDO:
+      if (stepper.distanceToGo() == 0) {
+        Serial.println("[PREVENTIVO-C2] ✅ Segundo ciclo preventivo concluído.");
+        stepper.setCurrentPosition(0);
+        
+        // AGORA SIM: Transição para o ciclo operacional normal
+        Serial.println("[PREVENTIVO] ✅ LIBERAÇÃO PREVENTIVA COMPLETA!");
+        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        Serial.println("[ICANDO] 🚀 Iniciando ciclo operacional - Acionando motor de içamento...");
+        digitalWrite(RELAY_CH1_PIN, LOW);
+        digitalWrite(LED_BUILTIN, HIGH);
+        
+        estadoAtual = ICANDO;
+        tempoInicioEstado = millis();
+      }
+      break;
+
+    // ==================== ESTADOS PRINCIPAIS DO LOOP OPERACIONAL ====================
     case ICANDO:
-      // Condição: Tempo de subida concluído
       if (millis() - tempoInicioEstado >= TEMPO_DE_SUBIDA) {
-        // --- START OF TRANSITION BLOCK ---
-        // Desativa o motor de içamento
-        digitalWrite(RELAY_CH1_PIN, HIGH);  // HIGH = relé desativado
-        digitalWrite(LED_BUILTIN, LOW);     // LOW = LED desativado
+        digitalWrite(RELAY_CH1_PIN, HIGH);
+        digitalWrite(LED_BUILTIN, LOW);
         Serial.println("[ICANDO] ✅ Motor de içamento desativado");
         
-        // Transição para próximo estado
         estadoAtual = RETENDO_ALTO;
         tempoInicioEstado = millis();
         Serial.println("[RETENDO_ALTO] ⏸️  Mantendo objeto suspenso...");
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
       
     case RETENDO_ALTO:
-      // Condição: Tempo de retenção concluído
       if (millis() - tempoInicioEstado >= TEMPO_DE_RETENCAO) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_INDO
-        Serial.println("[LIBERANDO] 🔓 Iniciando sequência de liberação...");
+        Serial.println("[LIBERANDO] 🔓 Iniciando sequência de liberação final...");
         Serial.print("[LIBERANDO] Movendo para a posição de liberação (-");
         Serial.print(ANGULO_LIBERACAO);
         Serial.println("°)...");
         int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
         stepper.moveTo(passos);
 
-        // State Transition
         estadoAtual = LIBERANDO_CICLO1_INDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
-      
-    case LIBERANDO_CICLO1_INDO:
-      // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
-      if (stepper.distanceToGo() == 0) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_CICLO1_ESPERANDO (nada além de logging)
-        Serial.print("[LIBERANDO-C1] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000); // Manter hardcoded conforme solicitado
-        Serial.println("ms...");
 
-        // State Transition
+    // ==================== ESTADOS DE LIBERAÇÃO FINAL (MANTIDOS IGUAIS) ====================
+    case LIBERANDO_CICLO1_INDO:
+      if (stepper.distanceToGo() == 0) {
+        Serial.print("[LIBERANDO-C1] Posição de liberação alcançada. Aguardando ");
+        Serial.print(1000);
+        Serial.println("ms...");
         estadoAtual = LIBERANDO_CICLO1_ESPERANDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
       
     case LIBERANDO_CICLO1_ESPERANDO:
-      // Condição: Espera 1000ms
       if (millis() - tempoInicioEstado >= 1000) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_CICLO1_VOLTANDO
         Serial.print("[LIBERANDO-C1] Retornando à posição zero com overdrive (alvo: +");
         Serial.print(PASSOS_OVERDRIVE);
         Serial.println(" passos)...");
         stepper.moveTo(PASSOS_OVERDRIVE);
-
-        // State Transition
         estadoAtual = LIBERANDO_CICLO1_VOLTANDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
       
     case LIBERANDO_CICLO1_VOLTANDO:
-      // Condição: Espera o stepper voltar para a posição de overdrive
       if (stepper.distanceToGo() == 0) {
-        // --- START OF TRANSITION BLOCK ---
         Serial.println("[LIBERANDO-C1] ✅ Primeiro ciclo de liberação concluído.");
-        stepper.setCurrentPosition(0); // Recalibra após o primeiro ciclo
+        stepper.setCurrentPosition(0);
 
-        // Entry Action for the NEXT state (LIBERANDO_PULSO_DC)
         Serial.print("[LIBERANDO-PULSO] ⚡ Acionando pulso de ");
         Serial.print(TEMPO_PULSO_DC);
         Serial.println("ms no motor DC...");
-        digitalWrite(RELAY_CH1_PIN, LOW); // Ativa o relé (motor DC)
-        digitalWrite(LED_BUILTIN, HIGH);  // Liga o LED junto
+        digitalWrite(RELAY_CH1_PIN, LOW);
+        digitalWrite(LED_BUILTIN, HIGH);
 
-        // State Transition
         estadoAtual = LIBERANDO_PULSO_DC;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
 
     case LIBERANDO_PULSO_DC:
-      // Condição: Espera o tempo do pulso terminar
       if (millis() - tempoInicioEstado >= TEMPO_PULSO_DC) {
-        // --- START OF TRANSITION BLOCK ---
-        // Desativa o motor DC
         digitalWrite(RELAY_CH1_PIN, HIGH);
         digitalWrite(LED_BUILTIN, LOW);
         Serial.println("[LIBERANDO-PULSO] ✅ Pulso DC concluído.");
 
-        // Entry Action for the NEXT state (LIBERANDO_CICLO2_INDO)
-        // (A lógica é idêntica ao início do primeiro ciclo)
         Serial.print("[LIBERANDO-C2] 🔓 Iniciando SEGUNDO ciclo de liberação (-");
         Serial.print(ANGULO_LIBERACAO);
         Serial.println("°)...");
         int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
         stepper.moveTo(passos);
 
-        // State Transition
         estadoAtual = LIBERANDO_CICLO2_INDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
 
     case LIBERANDO_CICLO2_INDO:
-      // Condição: Espera o stepper chegar na posição de -ANGULO_LIBERACAO°
       if (stepper.distanceToGo() == 0) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_CICLO2_ESPERANDO (nada além de logging)
         Serial.print("[LIBERANDO-C2] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000); // Manter hardcoded conforme solicitado
+        Serial.print(1000);
         Serial.println("ms...");
-
-        // State Transition
         estadoAtual = LIBERANDO_CICLO2_ESPERANDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
 
     case LIBERANDO_CICLO2_ESPERANDO:
-      // Condição: Espera 1000ms
       if (millis() - tempoInicioEstado >= 1000) {
-        // --- START OF TRANSITION BLOCK ---
-        // Entry Action for LIBERANDO_CICLO2_VOLTANDO
         Serial.print("[LIBERANDO-C2] Retornando à posição zero com overdrive (alvo: +");
         Serial.print(PASSOS_OVERDRIVE);
         Serial.println(" passos)...");
         stepper.moveTo(PASSOS_OVERDRIVE);
-
-        // State Transition
         estadoAtual = LIBERANDO_CICLO2_VOLTANDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
 
     case LIBERANDO_CICLO2_VOLTANDO:
-      // Condição: Espera o stepper voltar para a posição de overdrive
       if (stepper.distanceToGo() == 0) {
-        // --- START OF TRANSITION BLOCK ---
         Serial.println("[LIBERANDO-C2] ✅ Segundo ciclo de liberação concluído.");
-        stepper.setCurrentPosition(0); // Recalibra após o segundo ciclo
+        stepper.setCurrentPosition(0);
 
-        // Entry Action for the NEXT state (RETENDO_BAIXO)
         Serial.println("[RETENDO_BAIXO] ⏸️  Mantendo objeto baixo...");
-
-        // State Transition
         estadoAtual = RETENDO_BAIXO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
       
     case RETENDO_BAIXO:
-      // Condição: Tempo de retenção concluído
       if (millis() - tempoInicioEstado >= TEMPO_DE_QUEDA) {
-        // --- START OF TRANSITION BLOCK ---
         Serial.println("[CICLO COMPLETO] 🔄 Reiniciando ciclo...");
         Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
-        // Entry Action for the NEXT state (ICANDO)
-        Serial.println("[ICANDO] 🚀 Acionando motor de içamento...");
-        digitalWrite(RELAY_CH1_PIN, LOW);   // LOW = relé ativado (ativo baixo)
-        digitalWrite(LED_BUILTIN, HIGH);    // HIGH = LED ativado
-
-        // State Transition
-        estadoAtual = ICANDO;
+        // MUDANÇA CRÍTICA: Ao reiniciar, volta para a liberação preventiva
+        Serial.print("[PREVENTIVO-C1] 🔓 Iniciando nova liberação preventiva (-");
+        Serial.print(ANGULO_LIBERACAO);
+        Serial.println("°)...");
+        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
+        stepper.moveTo(passos);
+        
+        estadoAtual = PREVENTIVO_CICLO1_INDO;
         tempoInicioEstado = millis();
-        // --- END OF TRANSITION BLOCK ---
       }
       break;
   }

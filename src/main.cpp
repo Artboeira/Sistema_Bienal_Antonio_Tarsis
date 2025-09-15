@@ -1,426 +1,224 @@
-#include <Arduino.h>
-#include <AccelStepper.h>
+/*
+ * Sistema de Elevação com Descida Controlada - NEMA 23 + TB6600
+ * 
+ * Funcionamento:
+ * 1. Motor sobe por tempo determinado com velocidade controlada
+ * 2. Pausa no topo com motor travado
+ * 3. Motor desce com velocidade controlada (direção oposta)
+ * 4. Repete o ciclo
+ */
 
-// ==================== DEFINIÇÃO DOS PINOS ====================
-// Stepper Motor Pins
-const int STEP_PIN = 25;  // Pino de pulso (PUL+)
-const int DIR_PIN = 26;   // Pino de direção (DIR+)
-const int ENA_PIN = 27;   // Pino de habilitação (ENA+)
+// ==================== PINOS DO ESP32 ====================
+const int STEP_PIN = 25;  // Pulsos para o TB6600
+const int DIR_PIN = 26;   // Direção do motor
+const int ENA_PIN = 27;   // Habilita/desabilita motor
 
-// Relay Module Pins (ACTIVE LOW)
-const int RELAY_CH1_PIN = 21;  // Controle do motor de içamento
-const int RELAY_CH2_PIN = 22;  // Reserva para expansão
+// ==================== VELOCIDADES ====================
+const int VELOCIDADE_SUBIDA = 4000;     // Microssegundos entre pulsos (subida)
+const int VELOCIDADE_DESCIDA = 6000;    // Microssegundos entre pulsos (descida) - mais lenta para segurança
+const int VELOCIDADE_INICIAL = 4000;    // Partida suave (mais lenta)
 
-// Built-in LED pin
-// const int LED_BUILTIN = 2;     // LED embutido do ESP32
+// ==================== DIREÇÕES ====================
+const int SUBIR = HIGH;    // Ajuste se necessário
+const int DESCER = LOW;    // Direção oposta à subida
 
-// ==================== CONFIGURAÇÕES DO SISTEMA ====================
-// Tempo de cada etapa em milissegundos
-const unsigned long TEMPO_DE_SUBIDA = 18000;      // 18 segundos para içar
-const unsigned long TEMPO_DE_RETENCAO = 150000;    // 150 segundos mantendo suspenso
-const unsigned long TEMPO_DE_QUEDA = 40000;       // 40 segundos com objeto baixo
-const unsigned long TEMPO_PULSO_DC = 500; // 500ms de pulso para garantir a liberação
+// ==================== TEMPOS EM MILISSEGUNDOS ====================
+const unsigned long TEMPO_SUBIDA = 10000;     // 10 segundos subindo
+const unsigned long TEMPO_PAUSA = 5000;       // 5 segundos parado no topo
+const unsigned long TEMPO_DESCIDA = 12000;    // 12 segundos descendo (mais tempo pois é mais lento)
 
-// ==================== CONFIGURAÇÃO DO MOTOR DE PASSO ====================
-// Configuração dos passos por revolução (sem microstepping):
-const int STEPS_PER_REV = 200;  // 200 para 1/1 (full step), 400 para 1/2, 800 para 1/4, etc.
-
-// Ângulo de movimento do motor de passo durante a liberação
-const int ANGULO_LIBERACAO = 90;  // Graus para girar 
-
-// Ângulo de movimento do motor de passo durante o HOMING
-const int ANGULO_HOMING = 120;  // Graus para girar
-
-// Passos extras para garantir o reset contra o batente físico
-const int PASSOS_OVERDRIVE = 20;
-
-// ==================== DEFINIÇÃO DA MÁQUINA DE ESTADOS ====================
-enum EstadoSistema {
-  // Initialization States (executados apenas no setup)
-  INICIALIZANDO_LIBERACAO_INDO,
-  INICIALIZANDO_LIBERACAO_ESPERANDO,
-  INICIALIZANDO_LIBERACAO_VOLTANDO,
-
-  // NOVOS ESTADOS: Liberação Preventiva no Início do Loop Principal
-  PREVENTIVO_CICLO1_INDO,
-  PREVENTIVO_CICLO1_ESPERANDO,
-  PREVENTIVO_CICLO1_VOLTANDO,
-  PREVENTIVO_PULSO_DC,
-  PREVENTIVO_CICLO2_INDO,
-  PREVENTIVO_CICLO2_ESPERANDO,
-  PREVENTIVO_CICLO2_VOLTANDO,
-
-  // Estados Principais do Loop Operacional
-  ICANDO,              // Içando o objeto
-  RETENDO_ALTO,        // Mantendo o objeto suspenso
-
-  // Ciclo de Liberação Final (mantido para o final da sequência)
-  LIBERANDO_CICLO1_INDO,
-  LIBERANDO_CICLO1_ESPERANDO,
-  LIBERANDO_CICLO1_VOLTANDO,
-  LIBERANDO_PULSO_DC,
-  LIBERANDO_CICLO2_INDO,
-  LIBERANDO_CICLO2_ESPERANDO,
-  LIBERANDO_CICLO2_VOLTANDO,
-
-  RETENDO_BAIXO        // Mantendo o objeto baixo
+// ==================== CONTROLE DE ESTADOS ====================
+enum Estado {
+  SUBINDO,
+  PARADO_NO_TOPO,
+  DESCENDO,        // Mudamos de QUEDA_LIVRE para DESCENDO
+  PARADO_EM_BAIXO, // Novo estado: pausa embaixo antes de reiniciar
+  REINICIANDO
 };
 
-// ==================== VARIÁVEIS GLOBAIS ====================
-// Objeto AccelStepper para controle não bloqueante do motor de passo
-AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
+Estado estadoAtual = SUBINDO;
+unsigned long tempoInicio = 0;
 
-// Estado atual do sistema
-EstadoSistema estadoAtual = INICIALIZANDO_LIBERACAO_INDO;
-
-// Timestamp para controle de tempo não bloqueante
-unsigned long tempoInicioEstado = 0;
-
-// ==================== SETUP ====================
 void setup() {
-  // Inicializa a comunicação serial
+  // Inicia comunicação serial para monitoramento
   Serial.begin(115200);
-  delay(500);  // Pequeno delay para estabilizar serial
+  Serial.println("Sistema de Elevação com Descida Controlada Iniciado");
   
-  Serial.println("\n\n");
-  Serial.println("╔══════════════════════════════════════════════════════════╗");
-  Serial.println("║         CONTROLE DE SEQUÊNCIA ARTÍSTICA                 ║");
-  Serial.println("╠══════════════════════════════════════════════════════════╣");
-  Serial.println("║  INICIANDO CONFIGURAÇÃO DO SISTEMA                      ║");
-  Serial.println("╚══════════════════════════════════════════════════════════╝");
-  
-  // Configuração dos pinos
-  Serial.println("\n⚙️  Configurando pinos...");
+  // Configura os pinos como saída
   pinMode(STEP_PIN, OUTPUT);
   pinMode(DIR_PIN, OUTPUT);
   pinMode(ENA_PIN, OUTPUT);
-  pinMode(RELAY_CH1_PIN, OUTPUT);
-  pinMode(RELAY_CH2_PIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);
   
-  // Estado inicial dos pinos
-  digitalWrite(STEP_PIN, LOW);
-  digitalWrite(DIR_PIN, LOW);
-  digitalWrite(ENA_PIN, LOW);  // LOW = motor habilitado
-  digitalWrite(RELAY_CH1_PIN, HIGH);  // HIGH = relé desativado (ativo baixo)
-  digitalWrite(RELAY_CH2_PIN, HIGH);  // HIGH = relé desativado (ativo baixo)
-  digitalWrite(LED_BUILTIN, LOW);     // LOW = LED desativado
+  // Configura estado inicial: motor habilitado e subindo
+  digitalWrite(ENA_PIN, LOW);    // Motor ligado (LOW = habilitado no TB6600)
+  digitalWrite(DIR_PIN, SUBIR);  // Direção para subir
+  digitalWrite(STEP_PIN, LOW);   // Pulso em estado baixo
   
-  Serial.println("✅ Pinos configurados");
+  // Marca o tempo de início
+  tempoInicio = millis();
+  estadoAtual = SUBINDO;
   
-  // Configuração do motor de passo com AccelStepper
-  Serial.println("\n⚙️  Configurando motor de passo...");
-  stepper.setMaxSpeed(30.0);      // Velocidade máxima em passos/segundo
-  stepper.setAcceleration(15.0);    // Aceleração em passos/segundo/segundo
-  stepper.setCurrentPosition(0);     // Define posição inicial como zero
-  
-  // Corrige a direção do motor de passo
-  stepper.setPinsInverted(true, false, false);
-  
-  Serial.println("✅ Motor de passo configurado");
-  
-  // Sequência de homing (calibração de posição)
-  Serial.println("\n🏁 INICIANDO SEQUÊNCIA DE HOMING");
-  Serial.print("   Movendo motor ");
-  Serial.print(ANGULO_HOMING);
-  Serial.println("° no sentido anti-horário para calibrar...");
-  
-  // Move o motor ANGULO_HOMING graus (horário) para posição de referência
-  int passosHoming = (ANGULO_HOMING * STEPS_PER_REV) / 360;
-  stepper.moveTo(passosHoming);
-  
-  // Espera bloqueante para conclusão do homing (aceitável pois é apenas no setup)
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
-  }
-  
-  // Define a posição atual como zero após homing
-  stepper.setCurrentPosition(0);
-  Serial.println("✅ Posição calibrada - Zero absoluto estabelecido");
-  
-  // Inicia a sequência de liberação de segurança
-  Serial.println("\n🛡️ INICIANDO SEQUÊNCIA DE LIBERAÇÃO DE SEGURANÇA");
-  estadoAtual = INICIALIZANDO_LIBERACAO_INDO;
-  tempoInicioEstado = millis();
-
-  // Entry Action for the new initial state
-  Serial.print("[INICIALIZANDO] Movendo para a posição de liberação (-");
-  Serial.print(ANGULO_LIBERACAO);
-  Serial.println("°)...");
-  int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
-  stepper.moveTo(passos);
+  Serial.println("Iniciando subida controlada...");
 }
 
-// ==================== LOOP PRINCIPAL ====================
 void loop() {
-  // Sempre chamar run() para processar movimentos do stepper de forma não bloqueante
-  stepper.run();
+  unsigned long tempoAtual = millis();
+  unsigned long tempoDecorrido = tempoAtual - tempoInicio;
   
-  // Máquina de estados principal
-  switch (estadoAtual) {
-    // ==================== ESTADOS DE INICIALIZAÇÃO (SETUP) ====================
-    case INICIALIZANDO_LIBERACAO_INDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.print("[INICIALIZANDO] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000);
-        Serial.println("ms...");
-        estadoAtual = INICIALIZANDO_LIBERACAO_ESPERANDO;
-        tempoInicioEstado = millis();
+  switch(estadoAtual) {
+    
+    case SUBINDO:
+      // Gera pulsos continuamente para subir com velocidade controlada
+      gerarPulso(VELOCIDADE_SUBIDA);
+      
+      // Verifica se terminou o tempo de subida
+      if(tempoDecorrido >= TEMPO_SUBIDA) {
+        pararMotor();
+        estadoAtual = PARADO_NO_TOPO;
+        tempoInicio = tempoAtual;
+        Serial.println("Parado no topo - motor travado");
       }
       break;
       
-    case INICIALIZANDO_LIBERACAO_ESPERANDO:
-      if (millis() - tempoInicioEstado >= 1000) {
-        Serial.print("[INICIALIZANDO] Retornando à posição zero com overdrive (alvo: +");
-        Serial.print(PASSOS_OVERDRIVE);
-        Serial.println(" passos)...");
-        stepper.moveTo(PASSOS_OVERDRIVE);
-        estadoAtual = INICIALIZANDO_LIBERACAO_VOLTANDO;
-        tempoInicioEstado = millis();
+    case PARADO_NO_TOPO:
+      // Motor permanece travado (sem gerar pulsos, mas energizado)
+      // Apenas aguarda o tempo de pausa
+      
+      if(tempoDecorrido >= TEMPO_PAUSA) {
+        // Prepara para descida: muda direção mas mantém motor habilitado
+        prepararDescida();
+        estadoAtual = DESCENDO;
+        tempoInicio = tempoAtual;
+        Serial.println("Iniciando descida controlada");
       }
       break;
       
-    case INICIALIZANDO_LIBERACAO_VOLTANDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.println("[INICIALIZANDO] ✅ Liberação de segurança concluída.");
-        stepper.setCurrentPosition(0);
-        
-        // MUDANÇA CRÍTICA: Agora vai para a liberação preventiva, não direto para ICANDO
-        estadoAtual = PREVENTIVO_CICLO1_INDO;
-        tempoInicioEstado = millis();
-        
-        Serial.println("\n🚀 SISTEMA PRONTO. INICIANDO LIBERAÇÃO PREVENTIVA!");
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        Serial.print("[PREVENTIVO-C1] 🔓 Iniciando liberação preventiva (-");
-        Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°)...");
-        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
-        stepper.moveTo(passos);
-      }
-      break;
-
-    // ==================== NOVOS ESTADOS: LIBERAÇÃO PREVENTIVA ====================
-    case PREVENTIVO_CICLO1_INDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.print("[PREVENTIVO-C1] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000);
-        Serial.println("ms...");
-        estadoAtual = PREVENTIVO_CICLO1_ESPERANDO;
-        tempoInicioEstado = millis();
+    case DESCENDO:
+      // Motor agora desce com velocidade controlada (direção oposta)
+      gerarPulso(VELOCIDADE_DESCIDA);
+      
+      // Verifica se terminou o tempo de descida
+      if(tempoDecorrido >= TEMPO_DESCIDA) {
+        pararMotor();
+        estadoAtual = PARADO_EM_BAIXO;
+        tempoInicio = tempoAtual;
+        Serial.println("Chegou embaixo - motor travado");
       }
       break;
       
-    case PREVENTIVO_CICLO1_ESPERANDO:
-      if (millis() - tempoInicioEstado >= 1000) {
-        Serial.print("[PREVENTIVO-C1] Retornando à posição zero com overdrive (alvo: +");
-        Serial.print(PASSOS_OVERDRIVE);
-        Serial.println(" passos)...");
-        stepper.moveTo(PASSOS_OVERDRIVE);
-        estadoAtual = PREVENTIVO_CICLO1_VOLTANDO;
-        tempoInicioEstado = millis();
+    case PARADO_EM_BAIXO:
+      // Nova pausa embaixo antes de reiniciar o ciclo
+      // Isso dá tempo para o sistema se estabilizar
+      
+      if(tempoDecorrido >= 2000) { // 2 segundos de pausa embaixo
+        estadoAtual = REINICIANDO;
+        tempoInicio = tempoAtual;
+        Serial.println("Preparando novo ciclo...");
       }
       break;
       
-    case PREVENTIVO_CICLO1_VOLTANDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.println("[PREVENTIVO-C1] ✅ Primeiro ciclo preventivo concluído.");
-        stepper.setCurrentPosition(0);
-        
-        Serial.print("[PREVENTIVO-PULSO] ⚡ Acionando pulso preventivo de ");
-        Serial.print(TEMPO_PULSO_DC);
-        Serial.println("ms no motor DC...");
-        digitalWrite(RELAY_CH1_PIN, LOW);
-        digitalWrite(LED_BUILTIN, HIGH);
-        
-        estadoAtual = PREVENTIVO_PULSO_DC;
-        tempoInicioEstado = millis();
-      }
+    case REINICIANDO:
+      // Reabilita motor e configura para nova subida
+      reiniciarCiclo();
+      estadoAtual = SUBINDO;
+      tempoInicio = tempoAtual;
+      Serial.println("Novo ciclo - subindo novamente");
       break;
+  }
+  
+  // Verifica se há comandos do usuário
+  verificarComandos();
+}
 
-    case PREVENTIVO_PULSO_DC:
-      if (millis() - tempoInicioEstado >= TEMPO_PULSO_DC) {
-        digitalWrite(RELAY_CH1_PIN, HIGH);
-        digitalWrite(LED_BUILTIN, LOW);
-        Serial.println("[PREVENTIVO-PULSO] ✅ Pulso preventivo concluído.");
-        
-        Serial.print("[PREVENTIVO-C2] 🔓 Iniciando SEGUNDO ciclo preventivo (-");
-        Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°)...");
-        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
-        stepper.moveTo(passos);
-        
-        estadoAtual = PREVENTIVO_CICLO2_INDO;
-        tempoInicioEstado = millis();
+// ==================== FUNÇÕES DO MOTOR ====================
+
+void gerarPulso(int intervalo_micros) {
+  // Cria um pulso para fazer o motor dar um passo
+  // Funciona igual para subida e descida, só muda a direção configurada
+  digitalWrite(STEP_PIN, HIGH);
+  delayMicroseconds(intervalo_micros / 2);
+  digitalWrite(STEP_PIN, LOW);
+  delayMicroseconds(intervalo_micros / 2);
+}
+
+void pararMotor() {
+  // Para o motor mas mantém energizado (travado)
+  // Útil nas pausas no topo e embaixo
+  digitalWrite(STEP_PIN, LOW);
+  // ENA_PIN permanece LOW = motor continua habilitado e travado
+  Serial.println("Motor parado mas travado (energizado)");
+}
+
+void prepararDescida() {
+  // Configura o motor para descida controlada
+  // Muda apenas a direção, mantém motor habilitado
+  digitalWrite(DIR_PIN, DESCER);   // Inverte direção para descer
+  digitalWrite(STEP_PIN, LOW);     // Estado inicial do pulso
+  // Motor permanece habilitado (ENA_PIN continua LOW)
+  
+  delay(100);  // Pequena pausa para o driver processar a mudança de direção
+  Serial.println("Direção configurada para DESCIDA");
+}
+
+void reiniciarCiclo() {
+  // Prepara motor para novo ciclo de subida
+  digitalWrite(ENA_PIN, LOW);     // Garante que motor está ligado
+  digitalWrite(DIR_PIN, SUBIR);   // Volta direção de subida
+  digitalWrite(STEP_PIN, LOW);    // Estado inicial do pulso
+  
+  delay(500);  // Pausa para estabilização
+  Serial.println("Sistema reiniciado - pronto para subir");
+}
+
+// ==================== COMANDOS VIA SERIAL ====================
+
+void verificarComandos() {
+  if(Serial.available()) {
+    String comando = Serial.readString();
+    comando.trim();
+    
+    if(comando == "STOP") {
+      // Para tudo imediatamente e trava motor
+      pararMotor();
+      Serial.println("PARADA DE EMERGÊNCIA - Motor travado!");
+      while(true) {
+        delay(1000);  // Loop infinito - precisa resetar para continuar
       }
-      break;
+    }
+    else if(comando == "STATUS") {
+      // Mostra estado atual do sistema
+      Serial.print("Estado atual: ");
+      Serial.println(obterNomeEstado());
+      Serial.print("Motor habilitado: ");
+      Serial.println(digitalRead(ENA_PIN) == LOW ? "SIM" : "NÃO");
+      Serial.print("Direção: ");
+      Serial.println(digitalRead(DIR_PIN) == SUBIR ? "SUBIR" : "DESCER");
+      Serial.print("Tempo no estado atual: ");
+      Serial.print(millis() - tempoInicio);
+      Serial.println(" ms");
+    }
+    else if(comando == "VELOCIDADES") {
+      // Mostra as velocidades configuradas
+      Serial.println("=== VELOCIDADES CONFIGURADAS ===");
+      Serial.print("Subida: ");
+      Serial.print(VELOCIDADE_SUBIDA);
+      Serial.println(" microssegundos/pulso");
+      Serial.print("Descida: ");
+      Serial.print(VELOCIDADE_DESCIDA);
+      Serial.println(" microssegundos/pulso");
+      Serial.println("(Menor valor = mais rápido)");
+    }
+  }
+}
 
-    case PREVENTIVO_CICLO2_INDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.print("[PREVENTIVO-C2] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000);
-        Serial.println("ms...");
-        estadoAtual = PREVENTIVO_CICLO2_ESPERANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    case PREVENTIVO_CICLO2_ESPERANDO:
-      if (millis() - tempoInicioEstado >= 1000) {
-        Serial.print("[PREVENTIVO-C2] Retornando à posição zero com overdrive (alvo: +");
-        Serial.print(PASSOS_OVERDRIVE);
-        Serial.println(" passos)...");
-        stepper.moveTo(PASSOS_OVERDRIVE);
-        estadoAtual = PREVENTIVO_CICLO2_VOLTANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    case PREVENTIVO_CICLO2_VOLTANDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.println("[PREVENTIVO-C2] ✅ Segundo ciclo preventivo concluído.");
-        stepper.setCurrentPosition(0);
-        
-        // AGORA SIM: Transição para o ciclo operacional normal
-        Serial.println("[PREVENTIVO] ✅ LIBERAÇÃO PREVENTIVA COMPLETA!");
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        Serial.println("[ICANDO] 🚀 Iniciando ciclo operacional - Acionando motor de içamento...");
-        digitalWrite(RELAY_CH1_PIN, LOW);
-        digitalWrite(LED_BUILTIN, HIGH);
-        
-        estadoAtual = ICANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    // ==================== ESTADOS PRINCIPAIS DO LOOP OPERACIONAL ====================
-    case ICANDO:
-      if (millis() - tempoInicioEstado >= TEMPO_DE_SUBIDA) {
-        digitalWrite(RELAY_CH1_PIN, HIGH);
-        digitalWrite(LED_BUILTIN, LOW);
-        Serial.println("[ICANDO] ✅ Motor de içamento desativado");
-        
-        estadoAtual = RETENDO_ALTO;
-        tempoInicioEstado = millis();
-        Serial.println("[RETENDO_ALTO] ⏸️  Mantendo objeto suspenso...");
-      }
-      break;
-      
-    case RETENDO_ALTO:
-      if (millis() - tempoInicioEstado >= TEMPO_DE_RETENCAO) {
-        Serial.println("[LIBERANDO] 🔓 Iniciando sequência de liberação final...");
-        Serial.print("[LIBERANDO] Movendo para a posição de liberação (-");
-        Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°)...");
-        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
-        stepper.moveTo(passos);
-
-        estadoAtual = LIBERANDO_CICLO1_INDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    // ==================== ESTADOS DE LIBERAÇÃO FINAL (MANTIDOS IGUAIS) ====================
-    case LIBERANDO_CICLO1_INDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.print("[LIBERANDO-C1] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000);
-        Serial.println("ms...");
-        estadoAtual = LIBERANDO_CICLO1_ESPERANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-      
-    case LIBERANDO_CICLO1_ESPERANDO:
-      if (millis() - tempoInicioEstado >= 1000) {
-        Serial.print("[LIBERANDO-C1] Retornando à posição zero com overdrive (alvo: +");
-        Serial.print(PASSOS_OVERDRIVE);
-        Serial.println(" passos)...");
-        stepper.moveTo(PASSOS_OVERDRIVE);
-        estadoAtual = LIBERANDO_CICLO1_VOLTANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-      
-    case LIBERANDO_CICLO1_VOLTANDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.println("[LIBERANDO-C1] ✅ Primeiro ciclo de liberação concluído.");
-        stepper.setCurrentPosition(0);
-
-        Serial.print("[LIBERANDO-PULSO] ⚡ Acionando pulso de ");
-        Serial.print(TEMPO_PULSO_DC);
-        Serial.println("ms no motor DC...");
-        digitalWrite(RELAY_CH1_PIN, LOW);
-        digitalWrite(LED_BUILTIN, HIGH);
-
-        estadoAtual = LIBERANDO_PULSO_DC;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    case LIBERANDO_PULSO_DC:
-      if (millis() - tempoInicioEstado >= TEMPO_PULSO_DC) {
-        digitalWrite(RELAY_CH1_PIN, HIGH);
-        digitalWrite(LED_BUILTIN, LOW);
-        Serial.println("[LIBERANDO-PULSO] ✅ Pulso DC concluído.");
-
-        Serial.print("[LIBERANDO-C2] 🔓 Iniciando SEGUNDO ciclo de liberação (-");
-        Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°)...");
-        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
-        stepper.moveTo(passos);
-
-        estadoAtual = LIBERANDO_CICLO2_INDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    case LIBERANDO_CICLO2_INDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.print("[LIBERANDO-C2] Posição de liberação alcançada. Aguardando ");
-        Serial.print(1000);
-        Serial.println("ms...");
-        estadoAtual = LIBERANDO_CICLO2_ESPERANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    case LIBERANDO_CICLO2_ESPERANDO:
-      if (millis() - tempoInicioEstado >= 1000) {
-        Serial.print("[LIBERANDO-C2] Retornando à posição zero com overdrive (alvo: +");
-        Serial.print(PASSOS_OVERDRIVE);
-        Serial.println(" passos)...");
-        stepper.moveTo(PASSOS_OVERDRIVE);
-        estadoAtual = LIBERANDO_CICLO2_VOLTANDO;
-        tempoInicioEstado = millis();
-      }
-      break;
-
-    case LIBERANDO_CICLO2_VOLTANDO:
-      if (stepper.distanceToGo() == 0) {
-        Serial.println("[LIBERANDO-C2] ✅ Segundo ciclo de liberação concluído.");
-        stepper.setCurrentPosition(0);
-
-        Serial.println("[RETENDO_BAIXO] ⏸️  Mantendo objeto baixo...");
-        estadoAtual = RETENDO_BAIXO;
-        tempoInicioEstado = millis();
-      }
-      break;
-      
-    case RETENDO_BAIXO:
-      if (millis() - tempoInicioEstado >= TEMPO_DE_QUEDA) {
-        Serial.println("[CICLO COMPLETO] 🔄 Reiniciando ciclo...");
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        
-        // MUDANÇA CRÍTICA: Ao reiniciar, volta para a liberação preventiva
-        Serial.print("[PREVENTIVO-C1] 🔓 Iniciando nova liberação preventiva (-");
-        Serial.print(ANGULO_LIBERACAO);
-        Serial.println("°)...");
-        int passos = (-ANGULO_LIBERACAO * STEPS_PER_REV) / 360;
-        stepper.moveTo(passos);
-        
-        estadoAtual = PREVENTIVO_CICLO1_INDO;
-        tempoInicioEstado = millis();
-      }
-      break;
+const char* obterNomeEstado() {
+  // Converte o estado atual para texto legível
+  switch(estadoAtual) {
+    case SUBINDO: return "SUBINDO";
+    case PARADO_NO_TOPO: return "PARADO NO TOPO";
+    case DESCENDO: return "DESCENDO";           // Novo nome do estado
+    case PARADO_EM_BAIXO: return "PARADO EM BAIXO"; // Novo estado
+    case REINICIANDO: return "REINICIANDO";
+    default: return "DESCONHECIDO";
   }
 }
